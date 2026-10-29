@@ -1,21 +1,12 @@
 """
 This Module is Responsible for Communicating over the IETT API.
+There's a note that the IETT API
 """
 import zeep
 import json
-
-BASE_URL = "https://api.ibb.gov.tr/iett"
-
-WSDL_URLS = {
-    "Announcement" : f"{BASE_URL}/UlasimDinamikVeri/Duyurular.asmx?wsdl",
-    "Static" : f"{BASE_URL}/UlasimAnaVeri/HatDurakGuzergah.asmx?wsdl",
-    "Schedule" : f"{BASE_URL}/UlasimAnaVeri/HatDurakGuzergah.asmx?wsdl",
-    "Live_Vehicle" : f"{BASE_URL}/FiloDurum/SeferGerceklesme.asmx?wsdl",
-    "Planned": f"{BASE_URL}/UlasimAnaVeri/PlanlananSeferSaati.asmx?wsdl",
-}
+import wsdl_cleaner
 
 clients = {}
-
 
 def connect_client(service_name: str, timeout: int = 20) -> zeep.Client:
     """
@@ -23,32 +14,43 @@ def connect_client(service_name: str, timeout: int = 20) -> zeep.Client:
     """
     if service_name not in clients:
         transport = zeep.Transport(timeout=timeout, operation_timeout=timeout)
-        clients[service_name] = zeep.Client(WSDL_URLS[service_name], transport=transport)
+        wsdl_path = wsdl_cleaner.get_wsdl(service_name)
+        clients[service_name] = zeep.Client(str(wsdl_path), transport=transport)
     return clients[service_name]
 
 
-def send_request(service: str, operation: str, retries: int = 2) -> str:
+def send_request(service: str, operation: str, retries: int = 2, **kwargs) -> str:
     """
-    this function will send a SOAP POST request to the IETT API, and will retrieve the response.
-    it take:
-        IETT URL
-        SOAP Action
-        body_xml
-        timeout
+    this function will send a SOAP  request to the IETT API, and will retrieve the response.
     it returns the aqquired info from the IETT API
     """
+    tried = 0
+    while tried < retries:
+        try:
+            client = connect_client(service)
+            method = getattr(client.service, operation)
+            response = method(**kwargs)
+            return response
+        except Exception as e:
+            tried += 1
+            print(e)
+    return ""
 
-def can_make_request(state, max_rate=95):
+
+def can_make_request(state, max_rate=95) -> bool:
     """
     This function checks if we can make a request to the IETT API, according to the max_rate.
     """
-    pass
+    if state.get("HOURLY_REQUESTS", 0) < max_rate:
+        return True
+    return False
+
 
 def record_request(state):
     """
     This function will add the request counter in our state dictionary after every request that have been made.
     """
-    pass
+    state["HOURLY_REQUESTS"] += 1
 
 
 def fetch_buses_for_line(line_code: str, state: dict) -> list[dict]:
@@ -57,25 +59,68 @@ def fetch_buses_for_line(line_code: str, state: dict) -> list[dict]:
         Check if it can make request
         it make request to GetHatOtoKonum_json endpoint from IETT API
         record that request
+    the returned Request is in this format:
+    {
+        "kapino": "B-1872",
+        "boylam": "28.99263",
+        "enlem": "41.10806",
+        "hatkodu": "50H",
+        "guzergahkodu": "50H_D_D0",
+        "hatad": "ALİBEYKÖY - HACIOSMAN METRO",
+        "yon": "ALİBEYKÖY METRO",
+        "son_konum_zamani": "2026-10-29 22:44:57",
+        "yakinDurakKodu": "115191"
+    }
     """
-    pass
+    if can_make_request(state):
+        response = send_request("Live_Vehicle","GetHatOtoKonum_json" ,HatKodu=line_code)
+        record_request(state)
+        if not response:
+            return []
+        return json.loads(response)
+    return []
 
-def fetch_all_stops() -> list[dict]:
-    """
-    this function will get all the stops available in the IETT API from GetDurak_json endpoint.
-    it'll return them
-    """
-    pass
 
-def fetch_all_lines() -> list[dict]:
+def fetch_all_stops(state) -> str:
     """
-    this function will get all the lines available in the IETT API from GetHat_json endpoint.
-    it'll return them
+    this function will get all the stops available in the IETT API from GetDurak_csv endpoint.
+    it'll return a csv text containing all the stops available in the IETT API
     """
-    pass
+    if can_make_request(state):
+        response = send_request("Schedule","GetDurak_csv", DurakKodu="")
+        if not  response:
+            return ""
+        return response
+    return ""
 
-def fetch_announcements() -> list[dict]:
+def fetch_all_lines(state) -> str:
+    """
+    this function will get all the lines available in the IETT API from GetHat_csv endpoint.
+    it'll return a csv text containing all the lines available in the IETT API
+    """
+    if can_make_request(state):
+        response = send_request("Schedule","GetHat_csv", HatKodu="")
+        if not  response:
+            return ""
+        return response
+    return ""
+
+def fetch_announcements(state) -> list[dict]:
     """
     Get all announcements from the IETT API, from GetDuyurular_json endpoint.
+    the returned Request is in this format:
+    {
+        "HATKODU": "41E",
+        "HAT": "AYAZAGA - KABATAS",
+        "TIP": "Günlük",
+        "GUNCELLEME_SAATI": "Kayit Saati: 09:12",
+        "MESAJ": "GÜZERGAHTAKI YOGUN TRAFIK NEDENIYLE ARAÇLARIMIZ AYAZAGA KALKISLI SEFERLERINE 20 DAKIKA VE ÜZERI RÖTARLI HAREKET ETMEKTEDIR.\t"
+    }
     """
-    pass
+    if can_make_request(state):
+        response = send_request("Announcement","GetDuyurular_json" )
+        record_request(state)
+        if not response:
+            return []
+        return json.loads(response)
+    return []
